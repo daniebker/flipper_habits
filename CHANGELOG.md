@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-11
+
+### Added
+- Track habits straight from the habit list: OK logs one completion for today
+  and holding OK removes one. The LED blinks green on each log and the Flipper
+  vibrates when a habit is completed for the day.
+- Right arrow on a habit opens its year tracker page.
+- NFC tags: "Write NFC Tag" (under Edit Habits) writes a habit to an NTAG21x,
+  MIFARE Ultralight or MIFARE Classic tag, and scanning that tag while the
+  habit list is showing logs one completion. Vibration and LED colour tell you
+  whether it was logged, already complete, or not recognised. The write screen
+  reports "Tag Written", "Write Failed" or "Unsupported Tag".
+- Each habit now has a stable ID so a tag keeps working after the habit is
+  renamed. Existing habits get an ID the first time this version runs; the
+  save file format is unchanged.
+
+### Changed
+- The habit list is now a custom view with a checkbox per habit (empty,
+  half-filled or filled) in place of `[ ]`/`[x]` text.
+- Progress is saved to the SD card immediately after every change (logging or
+  removing a completion, changing an interval) instead of only when leaving a
+  screen, so it survives crashes and reboots.
+- Saves are written to a temporary file and then renamed over `habits.dat`, so
+  an interrupted save can no longer corrupt existing data. If the main file is
+  missing, the app recovers from the temporary file on start.
+
 ## [1.0.0] - 2026-11-11
 
 ### Added

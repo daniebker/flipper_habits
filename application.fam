@@ -5,10 +5,10 @@ App(
     name="Habit Tracker",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="flipper_habit_app",
-    requires=["gui", "storage"],
+    requires=["gui", "storage", "notification"],
     stack_size=4 * 1024,
     fap_category="Tools",
-    fap_version="1.0",
+    fap_version="1.1",
     fap_icon="flipper_habit.png",  # 10x10 1-bit PNG
     fap_description="Track daily habits with a year-long activity grid",
     fap_author="Daniel Baker",

@@ -13,6 +13,14 @@ typedef struct {
     char name[HABIT_NAME_LEN];
     /* Completions required per day: 1 = daily, N = N times a day. */
     uint8_t target;
+    uint8_t reserved;
+    /*
+     * Stable non-zero identifier, written to NFC tags so a tag keeps pointing at
+     * the same habit after renames, deletions and reordering. It occupies what
+     * used to be struct padding (always zero), so 0 means "not assigned yet" and
+     * the file format is unchanged.
+     */
+    uint16_t id;
     /* Most recent day (days since 1970-01-01) the history ring is aligned to. */
     uint32_t last_day;
     /* Ring buffer of completion counts, indexed by day % HABIT_HISTORY_DAYS. */
@@ -54,5 +62,9 @@ void habit_store_free(HabitStore* store);
 int habit_store_add(HabitStore* store, const char* name, uint8_t target, uint32_t today);
 void habit_store_remove(HabitStore* store, uint8_t index);
 void habit_store_sync(HabitStore* store, uint32_t today);
+/* Returns the index of the habit with this id, or -1. */
+int habit_store_find_by_id(const HabitStore* store, uint16_t id);
+/* Give every habit without an id a fresh one. Returns true if any were assigned. */
+bool habit_store_ensure_ids(HabitStore* store);
 bool habit_store_load(HabitStore* store);
 bool habit_store_save(const HabitStore* store);

@@ -2,14 +2,19 @@
 
 #include <furi.h>
 #include <furi_hal_rtc.h>
+#include <furi_hal_random.h>
 #include <storage/storage.h>
 #include <string.h>
 
 #define TAG "HabitData"
 
 #define HABIT_FILE_PATH    APP_DATA_PATH("habits.dat")
+#define HABIT_TMP_PATH     APP_DATA_PATH("habits.tmp")
 #define HABIT_FILE_MAGIC   0x31544248UL /* "HBT1" */
 #define HABIT_FILE_VERSION 1
+
+/* The on-disk format is the raw struct: adding the id must not change its size. */
+_Static_assert(sizeof(Habit) == 404, "Habit layout changed: bump HABIT_FILE_VERSION");
 
 /* ---- Date helpers (Howard Hinnant's civil date algorithms) ---- */
 
@@ -128,7 +133,32 @@ int habit_store_add(HabitStore* store, const char* name, uint8_t target, uint32_
     strlcpy(habit->name, name, HABIT_NAME_LEN);
     habit->target = target ? target : 1;
     habit_sync(habit, today);
-    return store->count++;
+    store->count++;
+    habit_store_ensure_ids(store);
+    return store->count - 1;
+}
+
+int habit_store_find_by_id(const HabitStore* store, uint16_t id) {
+    if(id == 0) return -1;
+    for(uint8_t i = 0; i < store->count; i++) {
+        if(store->habits[i].id == id) return i;
+    }
+    return -1;
+}
+
+bool habit_store_ensure_ids(HabitStore* store) {
+    bool assigned = false;
+    for(uint8_t i = 0; i < store->count; i++) {
+        Habit* habit = &store->habits[i];
+        if(habit->id != 0) continue;
+        uint16_t id;
+        do {
+            id = (uint16_t)furi_hal_random_get();
+        } while(id == 0 || habit_store_find_by_id(store, id) >= 0);
+        habit->id = id;
+        assigned = true;
+    }
+    return assigned;
 }
 
 void habit_store_remove(HabitStore* store, uint8_t index) {
@@ -155,13 +185,12 @@ typedef struct {
     uint8_t reserved[3];
 } HabitFileHeader;
 
-bool habit_store_load(HabitStore* store) {
-    Storage* storage = furi_record_open(RECORD_STORAGE);
+static bool habit_store_load_path(Storage* storage, HabitStore* store, const char* path) {
     File* file = storage_file_alloc(storage);
     bool ok = false;
 
     do {
-        if(!storage_file_open(file, HABIT_FILE_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) break;
+        if(!storage_file_open(file, path, FSAM_READ, FSOM_OPEN_EXISTING)) break;
 
         HabitFileHeader header;
         if(storage_file_read(file, &header, sizeof(header)) != sizeof(header)) break;
@@ -187,17 +216,34 @@ bool habit_store_load(HabitStore* store) {
 
     storage_file_close(file);
     storage_file_free(file);
+    return ok;
+}
+
+bool habit_store_load(HabitStore* store) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    bool ok = habit_store_load_path(storage, store, HABIT_FILE_PATH);
+    if(!ok && storage_common_exists(storage, HABIT_TMP_PATH)) {
+        /* A save was interrupted after the old file was replaced: recover the new copy. */
+        FURI_LOG_W(TAG, "Recovering habits from temp file");
+        ok = habit_store_load_path(storage, store, HABIT_TMP_PATH);
+        if(ok) storage_common_rename(storage, HABIT_TMP_PATH, HABIT_FILE_PATH);
+    }
     furi_record_close(RECORD_STORAGE);
     return ok;
 }
 
+/*
+ * Writes to a temp file first and renames it over the real file, so a crash or
+ * power loss mid-write never leaves a half-written habits.dat behind.
+ */
 bool habit_store_save(const HabitStore* store) {
     Storage* storage = furi_record_open(RECORD_STORAGE);
+    storage_simply_mkdir(storage, STORAGE_APP_DATA_PATH_PREFIX);
     File* file = storage_file_alloc(storage);
     bool ok = false;
 
     do {
-        if(!storage_file_open(file, HABIT_FILE_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) break;
+        if(!storage_file_open(file, HABIT_TMP_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) break;
 
         HabitFileHeader header = {
             .magic = HABIT_FILE_MAGIC,
@@ -209,13 +255,20 @@ bool habit_store_save(const HabitStore* store) {
 
         size_t size = sizeof(Habit) * store->count;
         if(storage_file_write(file, store->habits, size) != size) break;
+        if(!storage_file_sync(file)) break;
         ok = true;
     } while(false);
 
-    if(!ok) FURI_LOG_E(TAG, "Failed to save habits");
-
     storage_file_close(file);
     storage_file_free(file);
+
+    if(ok) {
+        ok = storage_common_rename(storage, HABIT_TMP_PATH, HABIT_FILE_PATH) == FSE_OK;
+    } else {
+        storage_common_remove(storage, HABIT_TMP_PATH);
+    }
+    if(!ok) FURI_LOG_E(TAG, "Failed to save habits");
+
     furi_record_close(RECORD_STORAGE);
     return ok;
 }

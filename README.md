@@ -11,8 +11,9 @@ many days across the past year each habit was completed.
 
 ## Features
 
-- **Habit list** showing today's progress for each habit, e.g. `[x] Read 1/1`
-  or `[ ] Water 3/8`.
+- **Habit list** showing today's progress for each habit, e.g. `Water 3/8`,
+  with a checkbox that is empty, half-filled or filled. Log a habit straight
+  from the list with one press of OK.
 - **Intervals:** daily, or 2–12 times a day.
 - **Year grid:** the last 53 weeks per habit, one column per week (Sunday to
   Saturday). The year is split into two stacked rows to fit the 128×64 screen.
@@ -22,12 +23,27 @@ many days across the past year each habit was completed.
 - **Header** shows the habit name (or selected date), the selected day's count
   such as `2/3`, and the number of days completed in the past 365 days, such as
   `87d`.
+- **NFC tags:** write a habit to an NFC tag, then just scan the tag to log
+  the habit. Stick a tag on your water bottle, book or running shoes.
 - **Back-filling:** move to any past day in the grid and log or undo completions.
 - Up to 16 habits, each with a year of history.
 
 ## Controls
 
-On the habit screen:
+On the habit list:
+
+| Button      | Action                                  |
+|-------------|-----------------------------------------|
+| OK          | Log one completion for today            |
+| Hold OK     | Remove one completion for today         |
+| Right       | Open the habit's year tracker page      |
+| Up / Down   | Move through the list                   |
+| Back        | Exit the app                            |
+
+The LED blinks green when you log a completion, and the Flipper vibrates when
+a habit is completed for the day.
+
+On the tracker page:
 
 | Button      | Action                         |
 |-------------|--------------------------------|
@@ -37,8 +53,50 @@ On the habit screen:
 | Left / Right| Previous / next week           |
 | Back        | Save and return to the list    |
 
-Use **+ Add Habit** to create a habit, and **Edit Habits** to change a habit's
+Press OK on **+ Add Habit** to create a habit, and **Edit Habits** to change a habit's
 interval, rename it or delete it.
+
+## NFC tags
+
+You can log a habit by scanning an NFC tag instead of pressing buttons.
+
+**Writing a tag**
+
+1. Open **Edit Habits**, pick the habit and choose **Write NFC Tag**.
+2. Hold a tag against the back of the Flipper until it says "Tag Written".
+
+Supported tags:
+
+- **NTAG21x** (NTAG213/215/216) and **MIFARE Ultralight**, not locked or
+  password-protected. The habit is written to the start of the tag's memory.
+- **MIFARE Classic** cards (the common blank white cards and key fobs) that
+  still use the factory default key. The habit is written to sector 1
+  (blocks 4-6).
+
+Writing overwrites what was stored in those places. Other tag types show
+"Unsupported Tag".
+
+**Scanning a tag**
+
+Open the app and hold the tag against the back of the Flipper while the habit
+list is showing. The app scans for tags the whole time the list is on screen.
+
+| Feedback                        | Meaning                                  |
+|---------------------------------|------------------------------------------|
+| One vibration, green blink      | Completion logged                        |
+| Two vibrations, blue blink      | Habit is already complete for today      |
+| Two vibrations, red blink       | Tag is for a habit that no longer exists |
+| Red blink only                  | Tag has no habit on it, or can't be read |
+
+Each scan logs one completion; take the tag away and scan again to log
+another. A tag keeps working after you rename its habit. If you delete the
+habit, the tag stops working and can be rewritten for another habit.
+
+The tag holds a standard NDEF text record such as
+`flipper-habit:1A2B Read`, so a phone can show which habit a tag belongs to.
+
+Scanning keeps the NFC reader on while the habit list is open, which uses more
+battery than the rest of the app.
 
 ## Building
 
@@ -55,8 +113,10 @@ The app then appears under **Apps → Tools → Habit Tracker**.
 ## Data
 
 Habits are stored on the SD card at
-`/ext/apps_data/flipper_habit/habits.dat`. They are saved when you leave a
-screen and when the app exits.
+`/ext/apps_data/flipper_habit/habits.dat` and are saved immediately after every
+change, so progress survives the app closing, crashes and reboots. Each save is
+written to a temporary file first and then swapped in, so an interrupted save
+cannot corrupt your existing data.
 
 "Today" comes from the Flipper's real-time clock, so make sure the date is set
 correctly. Changing a habit's interval also changes how past days are shown,
@@ -67,7 +127,9 @@ since they are always compared against the current target.
 | File | Purpose |
 |------|---------|
 | `src/flipper_habit.c` | App setup, menus and screens |
+| `src/habit_list_view.c/.h` | Habit list with quick tracking |
 | `src/habit_view.c/.h` | Year grid view and its controls |
+| `src/habit_nfc.c/.h` | Background NFC worker: scans and writes habit tags |
 | `src/habit_data.c/.h` | Date math, per-day history, saving and loading |
 | `application.fam` | App manifest |
 | `CHANGELOG.md` | Release history |

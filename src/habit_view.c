@@ -23,6 +23,8 @@
 
 struct HabitView {
     View* view;
+    HabitViewChangedCallback changed_callback;
+    void* changed_context;
 };
 
 typedef struct {
@@ -128,6 +130,7 @@ static void habit_view_move_cursor(HabitViewModel* model, int32_t delta) {
 static bool habit_view_input(InputEvent* event, void* context) {
     HabitView* habit_view = context;
     bool consumed = false;
+    bool changed = false;
 
     if(event->key == InputKeyBack) return false;
 
@@ -152,22 +155,35 @@ static bool habit_view_input(InputEvent* event, void* context) {
                     consumed = true;
                 } else if(event->key == InputKeyOk && event->type == InputTypeShort) {
                     uint8_t count = habit_get(habit, model->cursor);
-                    if(count < habit->target) habit_set(habit, model->cursor, count + 1);
+                    if(count < habit->target) {
+                        habit_set(habit, model->cursor, count + 1);
+                        changed = true;
+                    }
                     consumed = true;
                 } else if(event->key == InputKeyOk && event->type == InputTypeLong) {
                     uint8_t count = habit_get(habit, model->cursor);
-                    if(count > 0) habit_set(habit, model->cursor, count - 1);
+                    if(count > 0) {
+                        habit_set(habit, model->cursor, count - 1);
+                        changed = true;
+                    }
                     consumed = true;
                 }
             }
         },
         consumed);
 
+    /* Notify outside the model lock so the handler can do slow work (SD writes). */
+    if(changed && habit_view->changed_callback) {
+        habit_view->changed_callback(habit_view->changed_context);
+    }
+
     return consumed;
 }
 
 HabitView* habit_view_alloc(void) {
     HabitView* habit_view = malloc(sizeof(HabitView));
+    habit_view->changed_callback = NULL;
+    habit_view->changed_context = NULL;
     habit_view->view = view_alloc();
     view_allocate_model(habit_view->view, ViewModelTypeLocking, sizeof(HabitViewModel));
     view_set_context(habit_view->view, habit_view);
@@ -195,4 +211,12 @@ void habit_view_set_habit(HabitView* habit_view, Habit* habit, uint32_t today) {
             model->cursor = today;
         },
         true);
+}
+
+void habit_view_set_changed_callback(
+    HabitView* habit_view,
+    HabitViewChangedCallback callback,
+    void* context) {
+    habit_view->changed_callback = callback;
+    habit_view->changed_context = context;
 }
