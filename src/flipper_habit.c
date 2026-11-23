@@ -574,7 +574,7 @@ static bool scene_nfc_write_on_event(void* context, SceneManagerEvent event) {
     if(event.event == HabitEventNfcUnsupportedTag) {
         notification_message(app->notifications, &sequence_error);
         scene_nfc_write_show(
-            app, "Unsupported Tag", "Use NTAG, Ultralight\nor MIFARE Classic");
+            app, "Unsupported Tag", "Use NTAG, Ultralight,\nMIFARE Classic or ICODE");
         return true;
     }
     if(event.event == HabitEventPopupDone) {

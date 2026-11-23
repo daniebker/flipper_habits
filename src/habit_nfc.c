@@ -5,6 +5,8 @@
 #include <nfc/protocols/iso14443_3a/iso14443_3a_poller_sync.h>
 #include <nfc/protocols/mf_ultralight/mf_ultralight_poller_sync.h>
 #include <nfc/protocols/mf_classic/mf_classic_poller_sync.h>
+#include <nfc/nfc_poller.h>
+#include <nfc/protocols/iso15693_3/iso15693_3_poller.h>
 #include <string.h>
 
 #define TAG "HabitNfc"
@@ -27,6 +29,18 @@
 #define CLASSIC_FIRST_BLOCK 4 /* first data block of sector 1 */
 #define CLASSIC_BLOCK_SIZE  16
 
+/*
+ * ISO 15693 (NFC Forum Type 5, e.g. NXP ICODE SLIX) memory starts with a
+ * Capability Container, followed by the NDEF TLV.
+ */
+#define V_CC_SIZE      4
+#define V_CC_SIZE_LONG 8 /* CC with magic E2 for tags over 2 KB */
+#define V_MAX_BYTES    (V_CC_SIZE_LONG + TAG_MAX_BYTES)
+/* Write responses come once the EEPROM is programmed: at most 20 ms. */
+#define V_WRITE_FWT_FC 300000U
+/* Longest an ISO 15693 session may take before it is abandoned. */
+#define V_SESSION_TIMEOUT_MS 1000
+
 #define POLL_INTERVAL_MS 150
 /* Failed detections in a row before a tag counts as taken away. */
 #define ABSENT_THRESHOLD 3
@@ -42,6 +56,7 @@ typedef enum {
     TagTypeNone, /* nothing in the field */
     TagTypeUltralight,
     TagTypeClassic,
+    TagTypeVicinity, /* ISO 15693 */
     TagTypeUnsupported,
 } TagType;
 
@@ -55,10 +70,166 @@ struct HabitNfc {
 
     uint16_t write_id;
     char write_name[24];
+
+    /* Result of the ISO 15693 read done while detecting the tag. */
+    bool vicinity_readable;
+    uint16_t vicinity_id;
 };
+
+static uint16_t tag_parse(const uint8_t* buf, size_t len);
+static size_t tag_build(uint16_t habit_id, const char* name, uint8_t* out);
 
 static void habit_nfc_emit(HabitNfc* instance, HabitNfcEvent event, uint16_t id) {
     if(instance->callback) instance->callback(instance->context, event, id);
+}
+
+/* ---- ISO 15693 ---- */
+
+/*
+ * ISO 15693 has no sync helpers in the firmware API, so each read or write is
+ * one poller session: the poller activates the tag (reading all of its blocks)
+ * and our callback then works on it from the NFC worker thread.
+ */
+typedef struct {
+    HabitNfc* instance;
+    NfcPoller* poller;
+    FuriSemaphore* done;
+    bool write;
+    bool present; /* a tag answered and was activated */
+    bool ok; /* read: memory parsed; write: written and verified */
+    uint16_t habit_id; /* read: the ID found, 0 if none */
+} VicinitySession;
+
+static bool vicinity_write_block(
+    Iso15693_3Poller* poller,
+    uint8_t block,
+    const uint8_t* data,
+    uint8_t block_size) {
+    BitBuffer* tx = bit_buffer_alloc(3 + block_size);
+    BitBuffer* rx = bit_buffer_alloc(8);
+    bit_buffer_append_byte(tx, ISO15693_3_REQ_FLAG_SUBCARRIER_1 | ISO15693_3_REQ_FLAG_DATA_RATE_HI);
+    bit_buffer_append_byte(tx, ISO15693_3_CMD_WRITE_BLOCK);
+    bit_buffer_append_byte(tx, block);
+    bit_buffer_append_bytes(tx, data, block_size);
+
+    Iso15693_3Error error = iso15693_3_poller_send_frame(poller, tx, rx, V_WRITE_FWT_FC);
+    bool ok = error == Iso15693_3ErrorNone && bit_buffer_get_size_bytes(rx) >= 1 &&
+              !(bit_buffer_get_byte(rx, 0) & ISO15693_3_RESP_FLAG_ERROR);
+    if(!ok) {
+        FURI_LOG_W(
+            TAG,
+            "15693 write of block %u failed: %d, response %02X",
+            block,
+            error,
+            bit_buffer_get_size_bytes(rx) ? bit_buffer_get_byte(rx, 0) : 0);
+    }
+    bit_buffer_free(tx);
+    bit_buffer_free(rx);
+    return ok;
+}
+
+/* Put the habit on an activated tag, keeping its Capability Container. */
+static bool vicinity_write(VicinitySession* session, Iso15693_3Poller* poller) {
+    HabitNfc* instance = session->instance;
+    const Iso15693_3Data* data = (const Iso15693_3Data*)nfc_poller_get_data(session->poller);
+    const uint8_t block_size = iso15693_3_get_block_size(data);
+    const uint16_t block_count = iso15693_3_get_block_count(data);
+    const size_t memory = (size_t)block_size * block_count;
+    if(block_size == 0 || block_size > 32 || memory < V_CC_SIZE) return false;
+
+    /* Image of the start of memory: CC, then the NDEF message. */
+    uint8_t image[V_MAX_BYTES + 32];
+    memset(image, 0, sizeof(image));
+    const uint8_t* first = iso15693_3_get_block_data(data, 0);
+    size_t cc_size = V_CC_SIZE;
+    if(first[0] == 0xE1) {
+        memcpy(image, first, V_CC_SIZE);
+    } else if(first[0] == 0xE2 && memory >= V_CC_SIZE_LONG) {
+        cc_size = V_CC_SIZE_LONG;
+        for(size_t i = 0; i < V_CC_SIZE_LONG; i++) {
+            image[i] = iso15693_3_get_block_data(data, i / block_size)[i % block_size];
+        }
+    } else {
+        /* Blank tag: version 1.0, read/write, data area size in 8 byte units. */
+        size_t mlen = memory / 8;
+        image[0] = 0xE1;
+        image[1] = 0x40;
+        image[2] = mlen > 0xFF ? 0xFF : (uint8_t)mlen;
+        image[3] = 0x00;
+    }
+
+    size_t used = cc_size + tag_build(instance->write_id, instance->write_name, &image[cc_size]);
+    if(used > memory) {
+        FURI_LOG_W(TAG, "15693 tag too small: %u bytes", (unsigned)memory);
+        return false;
+    }
+    size_t blocks = (used + block_size - 1) / block_size;
+    FURI_LOG_D(TAG, "15693 write: %u blocks of %u", (unsigned)blocks, block_size);
+
+    for(size_t b = 0; b < blocks; b++) {
+        const uint8_t* want = &image[b * block_size];
+        /* Skip blocks that already match, e.g. a locked CC. */
+        if(memcmp(iso15693_3_get_block_data(data, b), want, block_size) == 0) continue;
+        if(!vicinity_write_block(poller, (uint8_t)b, want, block_size)) return false;
+    }
+
+    /* Read back to make sure the tag really holds the habit. */
+    uint8_t check[V_MAX_BYTES + 32];
+    for(size_t b = 0; b < blocks; b++) {
+        if(iso15693_3_poller_read_block(poller, &check[b * block_size], b, block_size) !=
+           Iso15693_3ErrorNone) {
+            return false;
+        }
+    }
+    return tag_parse(check, used) == instance->write_id;
+}
+
+static NfcCommand vicinity_callback(NfcGenericEvent event, void* context) {
+    VicinitySession* session = context;
+    const Iso15693_3PollerEvent* poller_event = event.event_data;
+
+    if(poller_event->type == Iso15693_3PollerEventTypeReady) {
+        session->present = true;
+        if(session->write) {
+            session->ok = vicinity_write(session, event.instance);
+        } else {
+            const Iso15693_3Data* data =
+                (const Iso15693_3Data*)nfc_poller_get_data(session->poller);
+            uint8_t block_size = iso15693_3_get_block_size(data);
+            uint16_t block_count = iso15693_3_get_block_count(data);
+            uint8_t buf[V_MAX_BYTES + 32];
+            size_t len = 0;
+            for(uint16_t b = 0; b < block_count && block_size && len + block_size <= sizeof(buf);
+                b++) {
+                memcpy(&buf[len], iso15693_3_get_block_data(data, b), block_size);
+                len += block_size;
+            }
+            session->habit_id = tag_parse(buf, len);
+            session->ok = len > 0;
+        }
+    }
+    /* Either way one pass is all we want. */
+    furi_semaphore_release(session->done);
+    return NfcCommandStop;
+}
+
+/* Run one ISO 15693 session. Returns false if no tag answered. */
+static bool vicinity_run(HabitNfc* instance, bool write, bool* ok, uint16_t* habit_id) {
+    VicinitySession session = {
+        .instance = instance,
+        .poller = nfc_poller_alloc(instance->nfc, NfcProtocolIso15693_3),
+        .done = furi_semaphore_alloc(1, 0),
+        .write = write,
+    };
+    nfc_poller_start(session.poller, vicinity_callback, &session);
+    furi_semaphore_acquire(session.done, V_SESSION_TIMEOUT_MS);
+    nfc_poller_stop(session.poller);
+    nfc_poller_free(session.poller);
+    furi_semaphore_free(session.done);
+
+    if(ok) *ok = session.ok;
+    if(habit_id) *habit_id = session.habit_id;
+    return session.present;
 }
 
 /* ---- Tag access ---- */
@@ -79,6 +250,12 @@ static TagType tag_detect(HabitNfc* instance) {
         FURI_LOG_D(TAG, "Tag detected, SAK %02X, type %d", sak, type);
     }
     iso14443_3a_free(data);
+
+    if(type == TagTypeNone &&
+       vicinity_run(instance, false, &instance->vicinity_readable, &instance->vicinity_id)) {
+        type = TagTypeVicinity;
+        FURI_LOG_D(TAG, "ISO 15693 tag detected");
+    }
     return type;
 }
 
@@ -187,6 +364,11 @@ static uint16_t tag_parse(const uint8_t* buf, size_t len) {
 
 /* Read the tag's habit ID. Returns false if the tag could not be read at all. */
 static bool tag_read_habit(HabitNfc* instance, TagType type, uint16_t* habit_id) {
+    if(type == TagTypeVicinity) {
+        /* Already read while detecting it. */
+        *habit_id = instance->vicinity_id;
+        return instance->vicinity_readable;
+    }
     uint8_t buf[TAG_MAX_BYTES];
     if(!tag_read_bytes(instance, type, buf, TAG_SCAN_BYTES)) return false;
     /* tag_read_bytes rounds up to whole pages / blocks, all within buf. */
@@ -221,6 +403,10 @@ static size_t tag_build(uint16_t habit_id, const char* name, uint8_t* out) {
 }
 
 static bool tag_write_habit(HabitNfc* instance, TagType type) {
+    if(type == TagTypeVicinity) {
+        bool ok = false;
+        return vicinity_run(instance, true, &ok, NULL) && ok;
+    }
     uint8_t buf[TAG_MAX_BYTES];
     size_t used = tag_build(instance->write_id, instance->write_name, buf);
     size_t unit = type == TagTypeClassic ? CLASSIC_BLOCK_SIZE : UL_PAGE_SIZE;
