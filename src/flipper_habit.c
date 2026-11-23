@@ -90,7 +90,7 @@ typedef struct {
     /* True while walking through the "add habit" flow (name -> interval). */
     bool adding;
     char text_buf[HABIT_NAME_LEN];
-    char popup_text[64];
+    char popup_text[96]; /* habit name + two lines of instructions */
 } HabitApp;
 
 /* Persist to the SD card right away so progress survives crashes and reboots. */
@@ -574,7 +574,7 @@ static bool scene_nfc_write_on_event(void* context, SceneManagerEvent event) {
     if(event.event == HabitEventNfcUnsupportedTag) {
         notification_message(app->notifications, &sequence_error);
         scene_nfc_write_show(
-            app, "Unsupported Tag", "Use NTAG, Ultralight\nor MIFARE Classic");
+            app, "Unsupported Tag", "Use NTAG, Ultralight,\nMIFARE Classic or ICODE");
         return true;
     }
     if(event.event == HabitEventPopupDone) {

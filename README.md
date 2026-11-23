@@ -72,6 +72,9 @@ Supported tags:
 - **MIFARE Classic** cards (the common blank white cards and key fobs) that
   still use the factory default key. The habit is written to sector 1
   (blocks 4-6).
+- **ISO 15693** tags (NFC Forum Type 5, such as NXP **ICODE SLIX**), not
+  locked or password-protected. Many NFC stickers use these. The habit is
+  written to the start of the tag's memory; a blank tag is formatted first.
 
 Writing overwrites what was stored in those places. Other tag types show
 "Unsupported Tag".

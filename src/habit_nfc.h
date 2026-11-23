@@ -14,6 +14,8 @@
  *   - NTAG21x / MIFARE Ultralight: stored from page 4 (start of user memory)
  *   - MIFARE Classic: stored in blocks 4-6 (sector 1), which must still use
  *     the factory default key FFFFFFFFFFFF
+ *   - ISO 15693 / NFC Forum Type 5 (e.g. NXP ICODE SLIX): stored after the
+ *     Capability Container in block 0, which is written if the tag is blank
  */
 
 typedef struct HabitNfc HabitNfc;
