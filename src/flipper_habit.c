@@ -90,7 +90,7 @@ typedef struct {
     /* True while walking through the "add habit" flow (name -> interval). */
     bool adding;
     char text_buf[HABIT_NAME_LEN];
-    char popup_text[64];
+    char popup_text[96]; /* habit name + two lines of instructions */
 } HabitApp;
 
 /* Persist to the SD card right away so progress survives crashes and reboots. */
